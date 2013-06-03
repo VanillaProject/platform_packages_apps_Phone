@@ -29,6 +29,8 @@ import com.android.internal.telephony.cdma.CdmaCallWaitingNotification;
 import com.android.internal.telephony.cdma.CdmaInformationRecords.CdmaDisplayInfoRec;
 import com.android.internal.telephony.cdma.CdmaInformationRecords.CdmaSignalInfoRec;
 import com.android.internal.telephony.cdma.SignalToneUtil;
+import com.android.internal.telephony.CallManager;
+import com.android.phone.CallFeaturesSetting;
 
 import android.app.ActivityManagerNative;
 import android.bluetooth.BluetoothAdapter;
@@ -208,7 +210,18 @@ public class CallNotifier extends Handler
 
         registerForNotifications();
 
-        createSignalInfoToneGenerator();
+        // Instantiate the ToneGenerator for SignalInfo and CallWaiting
+        // TODO: We probably don't need the mSignalInfoToneGenerator instance
+        // around forever. Need to change it so as to create a ToneGenerator instance only
+        // when a tone is being played and releases it after its done playing.
+        try {
+            mSignalInfoToneGenerator = new ToneGenerator(AudioManager.STREAM_VOICE_CALL,
+                    TONE_RELATIVE_VOLUME_SIGNALINFO);
+        } catch (RuntimeException e) {
+            Log.w(LOG_TAG, "CallNotifier: Exception caught while creating " +
+                    "mSignalInfoToneGenerator: " + e);
+            mSignalInfoToneGenerator = null;
+        }
 
         mRinger = ringer;
         BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
@@ -223,26 +236,6 @@ public class CallNotifier extends Handler
         telephonyManager.listen(mPhoneStateListener,
                 PhoneStateListener.LISTEN_MESSAGE_WAITING_INDICATOR
                 | PhoneStateListener.LISTEN_CALL_FORWARDING_INDICATOR);
-    }
-
-    private void createSignalInfoToneGenerator() {
-        // Instantiate the ToneGenerator for SignalInfo and CallWaiting
-        // TODO: We probably don't need the mSignalInfoToneGenerator instance
-        // around forever. Need to change it so as to create a ToneGenerator instance only
-        // when a tone is being played and releases it after its done playing.
-        if (mSignalInfoToneGenerator == null) {
-            try {
-                mSignalInfoToneGenerator = new ToneGenerator(AudioManager.STREAM_VOICE_CALL,
-                        TONE_RELATIVE_VOLUME_SIGNALINFO);
-                Log.d(LOG_TAG, "CallNotifier: mSignalInfoToneGenerator created when toneplay");
-            } catch (RuntimeException e) {
-                Log.w(LOG_TAG, "CallNotifier: Exception caught while creating " +
-                        "mSignalInfoToneGenerator: " + e);
-                mSignalInfoToneGenerator = null;
-            }
-        } else {
-            Log.d(LOG_TAG, "mSignalInfoToneGenerator created already, hence skipping");
-        }
     }
 
     @Override
@@ -881,7 +874,6 @@ public class CallNotifier extends Handler
         // Release the ToneGenerator used for playing SignalInfo and CallWaiting
         if (mSignalInfoToneGenerator != null) {
             mSignalInfoToneGenerator.release();
-            mSignalInfoToneGenerator = null;
         }
 
         // Clear ringback tone player
@@ -892,9 +884,6 @@ public class CallNotifier extends Handler
 
         mCM.unregisterForInCallVoicePrivacyOn(this);
         mCM.unregisterForInCallVoicePrivacyOff(this);
-
-        // Instantiate mSignalInfoToneGenerator
-        createSignalInfoToneGenerator();
 
         // Register all events new to the new active phone
         registerForNotifications();
@@ -1302,6 +1291,15 @@ public class CallNotifier extends Handler
             return;
         }
 
+        boolean notifProp = mApplication.getResources().getBoolean(R.bool.sprint_mwi_quirk);
+        boolean notifOption = Settings.System.getInt(mApplication.getPhone().getContext().getContentResolver(), Settings.System.ENABLE_MWI_NOTIFICATION, 0) == 1;
+        if (notifProp && !notifOption) {
+            // sprint_mwi_quirk is true, and ENABLE_MWI_NOTIFICATION is unchecked or unset (false)
+            // ignore the mwi event, but log if we're debugging.
+            if (VDBG) log("onMwiChanged(): mwi_notification is disabled. Ignoring...");
+            return;
+        }
+
         mApplication.notificationMgr.updateMwi(visible);
     }
 
@@ -1344,8 +1342,7 @@ public class CallNotifier extends Handler
      */
     /* package */ void restartRinger() {
         if (DBG) log("restartRinger()...");
-        // Already ringing or Silent requested; no need to restart.
-        if (isRinging() || mSilentRingerRequested) return;
+        if (isRinging()) return;  // Already ringing; no need to restart.
 
         final Call ringingCall = mCM.getFirstActiveRingingCall();
         // Don't check ringingCall.isRinging() here, since that'll be true
