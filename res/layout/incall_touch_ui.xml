@@ -181,7 +181,18 @@
                     android:contentDescription="@string/onscreenMergeCallsText"
                     />
 
-                <!-- Separator between 4th (or 5th) button and right padding -->
+                <!-- Separator between 3rd (or 4th) and 4th (or 6th) button -->
+                <View style="@style/VerticalSeparator" />
+
+                <!-- "Blacklist" -->
+                <!-- The button used for toggling blackist. -->
+                <ImageButton android:id="@+id/addBlacklistButton"
+                    style="@style/InCallButton"
+                    android:src="@drawable/ic_block_contact_holo_dark"
+                    android:contentDescription="@string/onscreenBlacklistText"
+                    />
+
+                <!-- Separator between 5th (or 6th) button and right padding -->
                 <View style="@style/VerticalSeparator" />
 
             </LinearLayout>
@@ -211,9 +222,9 @@
         android:layout_gravity="center|bottom"
         android:layout_marginTop="20dip"
         android:layout_marginBottom="-46dp"
-        android:background="@android:color/black"
+        android:background="@android:color/transparent"
         android:visibility="gone"
-        android:gravity="top"
+        android:gravity="left|top"
 
         prvandroid:targetDrawables="@array/incoming_call_widget_3way_targets"
         prvandroid:targetDescriptions="@array/incoming_call_widget_3way_target_descriptions"

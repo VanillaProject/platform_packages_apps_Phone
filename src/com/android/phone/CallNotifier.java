@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2006 The Android Open Source Project
+ * Blacklist - Copyright (C) 2013 The CyanogenMod Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +21,7 @@ import com.android.internal.telephony.Call;
 import com.android.internal.telephony.CallManager;
 import com.android.internal.telephony.CallerInfo;
 import com.android.internal.telephony.CallerInfoAsyncQuery;
+import com.android.internal.telephony.CallStateException;
 import com.android.internal.telephony.Connection;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.PhoneConstants;
@@ -29,14 +31,17 @@ import com.android.internal.telephony.cdma.CdmaCallWaitingNotification;
 import com.android.internal.telephony.cdma.CdmaInformationRecords.CdmaDisplayInfoRec;
 import com.android.internal.telephony.cdma.CdmaInformationRecords.CdmaSignalInfoRec;
 import com.android.internal.telephony.cdma.SignalToneUtil;
-import com.android.internal.telephony.CallManager;
-import com.android.phone.CallFeaturesSetting;
 
 import android.app.ActivityManagerNative;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothHeadset;
 import android.bluetooth.BluetoothProfile;
 import android.content.Context;
+import android.content.Intent;
+import android.content.res.Resources;
 import android.media.AudioManager;
 import android.media.ToneGenerator;
 import android.net.Uri;
@@ -147,6 +152,7 @@ public class CallNotifier extends Handler
     private static final int EVENT_OTA_PROVISION_CHANGE = 25;
     private static final int CDMA_CALL_WAITING_REJECT = 26;
     private static final int UPDATE_IN_CALL_NOTIFICATION = 27;
+    private static final int VIBRATE_45_SEC = 28;
 
     // Emergency call related defines:
     private static final int EMERGENCY_TONE_OFF = 0;
@@ -181,8 +187,12 @@ public class CallNotifier extends Handler
     // Call waiting tone player
     private InCallTonePlayer mCallWaitingTonePlayer;
 
-    // Cached AudioManager
+    // Cached system services
     private AudioManager mAudioManager;
+    private Vibrator mVibrator;
+
+    // Blacklist handling
+    private static final String BLACKLIST = "Blacklist";
 
     /**
      * Initialize the singleton CallNotifier instance.
@@ -207,6 +217,7 @@ public class CallNotifier extends Handler
         mCallLog = callLog;
 
         mAudioManager = (AudioManager) mApplication.getSystemService(Context.AUDIO_SERVICE);
+        mVibrator = (Vibrator) mApplication.getSystemService(Context.VIBRATOR_SERVICE);
 
         registerForNotifications();
 
@@ -363,6 +374,11 @@ public class CallNotifier extends Handler
                 mApplication.notificationMgr.updateInCallNotification();
                 break;
 
+            case VIBRATE_45_SEC:
+                vibrate(70, 0, 0);
+                sendEmptyMessageDelayed(VIBRATE_45_SEC, 60000);
+                break;
+
             default:
                 // super.handleMessage(msg);
         }
@@ -409,6 +425,29 @@ public class CallNotifier extends Handler
             return;
         }
 
+        // Blacklist handling
+        String number = c.getAddress();
+        if (TextUtils.isEmpty(number)) {
+            number = Blacklist.PRIVATE_NUMBER;
+        }
+        if (DBG) log("Incoming number is: " + number);
+        // See if the number is in the blacklist
+        // Result is one of: MATCH_NONE, MATCH_LIST or MATCH_REGEX
+        int listType = mApplication.blackList.isListed(number);
+        if (listType != Blacklist.MATCH_NONE) {
+            // We have a match, set the user and hang up the call and notify
+            if (DBG) log("Incoming call from " + number + " blocked.");
+            c.setUserData(BLACKLIST);
+            try {
+                c.hangup();
+                mApplication.notificationMgr.notifyBlacklistedCall(number,
+                        c.getCreateTime(), listType);
+            } catch (CallStateException e) {
+                e.printStackTrace();
+            }
+            return;
+        }
+
         // Stop any signalInfo tone being played on receiving a Call
         stopSignalInfoTone();
 
@@ -451,6 +490,9 @@ public class CallNotifier extends Handler
         if (PhoneUtils.isRealIncomingCall(state)) {
             startIncomingCallQuery(c);
         } else {
+            if (PhoneUtils.PhoneSettings.vibCallWaiting(mApplication)) {
+                vibrate(200, 300, 500);
+            }
             if (VDBG) log("- starting call waiting tone...");
             if (mCallWaitingTonePlayer == null) {
                 mCallWaitingTonePlayer = new InCallTonePlayer(InCallTonePlayer.TONE_CALL_WAITING);
@@ -773,6 +815,26 @@ public class CallNotifier extends Handler
             }
 
             if (VDBG) log("onPhoneStateChanged: OFF HOOK");
+
+            Call call = PhoneUtils.getCurrentCall(fgPhone);
+            Connection c = PhoneUtils.getConnection(fgPhone, call);
+            if (VDBG) PhoneUtils.dumpCallState(fgPhone);
+            Call.State cstate = call.getState();
+
+            if (cstate == Call.State.ACTIVE && !c.isIncoming()) {
+                long callDurationMsec = c.getDurationMillis();
+                if (VDBG) Log.v(LOG_TAG, "duration is " + callDurationMsec);
+                boolean vibOut = PhoneUtils.PhoneSettings.vibOutgoing(mApplication);
+                if (vibOut && callDurationMsec < 200) {
+                    vibrate(100, 0, 0);
+                }
+                boolean vib45 = PhoneUtils.PhoneSettings.vibOn45Secs(mApplication);
+                if (vib45) {
+                    callDurationMsec = callDurationMsec % 60000;
+                    start45SecondVibration(callDurationMsec);
+                }
+            }
+
             // make sure audio is in in-call mode now
             PhoneUtils.setAudioMode(mCM);
 
@@ -1030,6 +1092,20 @@ public class CallNotifier extends Handler
             removeMessages(CALLWAITING_ADDCALL_DISABLE_TIMEOUT);
         }
 
+        if (c != null) {
+            Object o = c.getUserData();
+            if (BLACKLIST.equals(o)) {
+                if (VDBG) Log.i(LOG_TAG, "in blacklist so skip calllog");
+                return;
+            }
+
+            boolean vibHangup = PhoneUtils.PhoneSettings.vibHangup(mApplication);
+            if (vibHangup && c.getDurationMillis() > 0) {
+                vibrate(50, 100, 50);
+            }
+            removeMessages(VIBRATE_45_SEC);
+        }
+
         // Stop the ringer if it was ringing (for an incoming call that
         // either disconnected by itself, or was rejected by the user.)
         //
@@ -1259,6 +1335,30 @@ public class CallNotifier extends Handler
         }
     }
 
+    private void start45SecondVibration(long callDurationMsec) {
+        if (VDBG) Log.v(LOG_TAG, "vibrate start @" + callDurationMsec);
+
+        removeMessages(VIBRATE_45_SEC);
+
+        long timer;
+        if (callDurationMsec > 45000) {
+            // Schedule the alarm at the next minute + 45 secs
+            timer = 45000 + 60000 - callDurationMsec;
+        } else {
+            // Schedule the alarm at the first 45 second mark
+            timer = 45000 - callDurationMsec;
+        }
+
+        sendEmptyMessageDelayed(VIBRATE_45_SEC, timer);
+    }
+
+    public void vibrate(int v1, int p1, int v2) {
+        long[] pattern = new long[] {
+            0, v1, p1, v2
+        };
+        mVibrator.vibrate(pattern, -1);
+    }
+
     /**
      * Resets the audio mode and speaker state when a call ends.
      */
@@ -1288,15 +1388,6 @@ public class CallNotifier extends Handler
             // *should* be blocked at the telephony layer on non-voice-capable
             // capable devices.)
             Log.w(LOG_TAG, "Got onMwiChanged() on non-voice-capable device! Ignoring...");
-            return;
-        }
-
-        boolean notifProp = mApplication.getResources().getBoolean(R.bool.sprint_mwi_quirk);
-        boolean notifOption = Settings.System.getInt(mApplication.getPhone().getContext().getContentResolver(), Settings.System.ENABLE_MWI_NOTIFICATION, 0) == 1;
-        if (notifProp && !notifOption) {
-            // sprint_mwi_quirk is true, and ENABLE_MWI_NOTIFICATION is unchecked or unset (false)
-            // ignore the mwi event, but log if we're debugging.
-            if (VDBG) log("onMwiChanged(): mwi_notification is disabled. Ignoring...");
             return;
         }
 

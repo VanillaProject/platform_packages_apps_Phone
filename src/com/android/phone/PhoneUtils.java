@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2006 The Android Open Source Project
+ * Blacklist - Copyright (C) 2013 The CyanogenMod Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +25,7 @@ import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
@@ -36,6 +38,8 @@ import android.os.Handler;
 import android.os.Message;
 import android.os.RemoteException;
 import android.os.SystemProperties;
+import android.preference.PreferenceManager;
+import android.provider.ContactsContract;
 import android.provider.Settings;
 import android.telephony.PhoneNumberUtils;
 import android.text.TextUtils;
@@ -357,6 +361,65 @@ public class PhoneUtils {
         if (DBG) log("==> hungup = " + hungup);
 
         return hungup;
+    }
+
+    static Call getCurrentCall(Phone phone) {
+        Call ringing = phone.getRingingCall();
+        Call fg = phone.getForegroundCall();
+        Call bg = phone.getBackgroundCall();
+        if (!ringing.isIdle()) {
+            return ringing;
+        }
+        if (!fg.isIdle()) {
+            return fg;
+        }
+        if (!bg.isIdle()) {
+            return bg;
+        }
+        return fg;
+    }
+
+    static Connection getConnection(Phone phone, Call call) {
+        if (call == null) {
+            return null;
+        }
+        if (phone.getPhoneType() == PhoneConstants.PHONE_TYPE_CDMA) {
+            return call.getLatestConnection();
+        }
+        return call.getEarliestConnection();
+    }
+
+    static class PhoneSettings {
+        static boolean vibOn45Secs(Context context) {
+           return getPrefs(context).getBoolean("button_vibrate_45", false);
+        }
+        static boolean vibHangup(Context context) {
+            return getPrefs(context).getBoolean("button_vibrate_hangup", false);
+        }
+        static boolean vibOutgoing(Context context) {
+            return getPrefs(context).getBoolean("button_vibrate_outgoing", false);
+        }
+        static boolean vibCallWaiting(Context context) {
+            return getPrefs(context).getBoolean("button_vibrate_call_waiting", false);
+        }
+         static boolean isBlacklistEnabled(Context context) {
+            return getPrefs(context).getBoolean("button_enable_blacklist", false);
+        }
+        static boolean isBlacklistNotifyEnabled(Context context) {
+            return getPrefs(context).getBoolean("button_nofify", false);
+        }
+        static boolean isBlacklistPrivateNumberEnabled(Context context) {
+            return getPrefs(context).getBoolean("button_blacklist_private_numbers", false);
+        }
+        static boolean isBlacklistUnknownNumberEnabled(Context context) {
+            return getPrefs(context).getBoolean("button_blacklist_unknown_numbers", false);
+        }
+        static boolean isBlacklistRegexEnabled(Context context) {
+            return getPrefs(context).getBoolean("button_blacklist_regex", false);
+        }
+        private static SharedPreferences getPrefs(Context context) {
+            return PreferenceManager.getDefaultSharedPreferences(context);
+        }
     }
 
     static boolean hangupRingingCall(Call ringing) {
@@ -1572,7 +1635,11 @@ public class PhoneUtils {
             // return it to the user.
 
             cit = new CallerInfoToken();
-            cit.currentInfo = (CallerInfo) userDataObject;
+            if (userDataObject instanceof String) { // only blacklist will cause this, so just ignore this.
+                cit.currentInfo = new CallerInfo();
+            } else {
+                cit.currentInfo = (CallerInfo) userDataObject;
+            }
             cit.asyncQuery = null;
             cit.isFinal = true;
             // since the query is already done, call the listener.
